@@ -1320,3 +1320,58 @@ using声明的是一个名字，而非一个特定的函数，不能指定形参
 using指示则是将命名空间内的函数提升到命名空间自己的作用域中，这些函数被添加到这个作用域的重载集合中。如果有形参列表相同的情况也不会错误，只要指明是哪个函数版本即可。
 
 ## 18.3 多重继承与虚继承
+### 18.3.1 多重继承
+C++11中允许派生类从一个或多个基类中继承构造函数。继承多个拥有同样参数列表的构造函数会导致错误。
+```C++
+struct B1 {
+    B1() = default;
+    B1(const string&);
+};
+struct B2 {
+    B2() = default;
+    B2(const string&);
+};
+
+// error
+struct D1 : public B1, public B2 {
+    using B1::B1;
+    using B2::B2;
+};
+
+// D2 has to define its own constructor
+struct D2 : public B1, public B2 {
+    using B1::B1;
+    using B2::B2;
+    D2(const string& s) : B1(s), B2(s) {}
+    D2() = default;
+};
+```
+### 18.3.2 类型转换与多个基类
+### 18.3.3 多重继承下的类作用域
+### 18.3.4 虚继承
+IO标准库的istream和ostream分别继承了base_ios的抽象基类，base_ios负责保存流的缓冲内容并管理流的条件状态。iostream同时继承istream和ostream，读写流的内容。\
+如果iostream对象希望在同一个缓冲区操作，要去条件状态同时反映输入输出情况，则其最好只有一份base_ios的拷贝。
+
+虚派生只影响从虚基类的派生类中进一步派生的类，不会影响虚基类的派生类本身。
+
+如果虚基类中有成员x，派生类D1和D2均覆盖了x，则同时继承D1和D2的D需要重新定义新的x，不然会产生二义性错误。
+
+### 18.3.5 构造函数与虚继承
+最底层派生类负责初始化虚基类，如果最底层派生类没有显式初始化虚基类，则虚基类的默认构造函数将被调用，如果虚基类没有默认构造函数则发生错误。
+
+```C++
+class ZooAnimal;
+class Bear : public virtual ZooAnimal {};
+class Character;
+class BookCharacter : public Character {};
+class ToyAnimal;
+class TeddyBear : public BookCharacter, public Bear, public virtual ToyAnimal {};
+
+// when init TeddyBear, the sequence of calling constructors:
+// ZooAnimal();
+// ToyAnimal();
+// Character();
+// BookCharacter();
+// Bear();
+// TeddyBear();
+```
