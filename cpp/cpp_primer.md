@@ -1376,7 +1376,39 @@ class TeddyBear : public BookCharacter, public Bear, public virtual ToyAnimal {}
 // TeddyBear();
 ```
 
-# Chapter 19
+# Chapter 19 特殊工具与技术
+## 19.1 控制内存分配
+某些程序需要自定义内存分配细节，比如使用关键字new将对象放置在特定内存空间中。因此程序需要重载new和delete运算符。
+
+### 19.1.1 重载new和delete
+new表达式执行时首先调用operator new或者operator new[]标准库函数，分配一块足够大的原始的未命名的内存空间用来存储对象或者数组。之后编译器运行相应的构造函数来构造对象，并传入初值。构造完成后返回指向该对象的指针。delete则先执行析构函数，再调用operator delete或者operator delete[]释放空间。\
+应用程序可以再全局作用域定义自己的operator new和operator delete，也可以定义为成员函数。如果被分配的对象是类类型，则编译器首先在类中查找，如果该类含有operator new或者operator delete成员，则表达式将调用这些成员。否则编译器在全局作用域查找匹配的函数，如果找到用户自定义版本则执行该版本的new或者delete表达式。如果都没有则使用标准库定义的版本。可以使用作用域运算符忽略定义在类中的函数（::new或者::delete）。
+
+类型nothrow_t定义在new头文件中，同时定义了一个名为nothrow的const对象，用户可通过此对象请求new的非抛出异常版本。与析构函数类似，operator delete也不允许抛出异常，重载时需要noexcept。\
+此运算符函数定义为类成员时是隐式静态的，因为operator new用在对象构造之前，operator delete用在对象销毁之后，而且它们不能操纵任何数据成员。\
+operator new必须返回void*，第一个形参必须是size_t且该形参不能含有默认实参。operator new的该形参指定对象所需的字节数，operator new[]的该形参指定数组所有元素所需的空间。\
+自定义operator new可以提供额外的形参，这时使用new的定位形式，将实参传给新增的形参。第二个实参为void*的operator new不能被用户重载。\
+operator delete返回void，第一个形参类型必须是void*。将operator delete定义为类的成员时该函数可以包含另外一个类型为size_t的形参，初始值为第一个形参所指对象的字节数，此形参可用于删除继承体系中的对象，如果基类有一个虚析构函数，则传递给operator delete的字节数将因动态类型有所区别。
+
+可以使用malloc和free函数，malloc函数接受size_t表示待分配字节数，返回指向分配空间的指针。返回0表示分配失败。free函数接受void*，是malloc返回的指针的副本，free将相关内存返回给系统。free(0)无意义。
+```C++
+void* operator new(size_t size) {
+    if (void* mem = malloc(size)) {
+        return mem;
+    }
+    else {
+        throw bad_alloc();
+    }
+}
+void operator delete(void* mem) noexcept { free(mem); }
+```
+
+### 19.1.2 定位new表达式
+与allocator的allocate和deallocate类似，operator new和operator delete负责分配或者释放内存空间，但是不会构造或者销毁对象。不同的是operator new分配的空间无法使用construct构造对象，而是应该使用定位new构造对象。可以使用定位new传递一个地址，如new (place_address) type，其中place_address为指针，同时可以提供初始化列表。如果只有一个地址值，那么定位new就使用的是operator new(size_t, void*)，这是无法被用户自定义的版本。此函数不分配任何内存，只是返回指针实参。new表达式负责在指定的地址初始化对象。因此定位new允许我们在特定的，预先分配的内存地址上构造对象。\
+传给定位new表达式的指针无需是operator new分配的内存，但是
+传给construct的指针必须是同一个allocator分配的空间。
+
+
 ## 19.8 固有的不可移植的特性
 不可移植特性指因机器而异的特性，含有不可移植特性的程序转移到另一台机器上时通常需要被重新编写。例如算术类型大小在不同机器上不同。
 ### 19.8.1 位域
