@@ -1375,3 +1375,88 @@ class TeddyBear : public BookCharacter, public Bear, public virtual ToyAnimal {}
 // Bear();
 // TeddyBear();
 ```
+
+# Chapter 19
+## 19.8 固有的不可移植的特性
+不可移植特性指因机器而异的特性，含有不可移植特性的程序转移到另一台机器上时通常需要被重新编写。例如算术类型大小在不同机器上不同。
+### 19.8.1 位域
+类可以将非静态成员定义为位域（bit-field），一个位域中含有一定数量的二进制位。位域类型为整型或枚举类型。通常使用无符号类型。位域声明形式为成员名字后紧跟冒号以及常量表达式，用于指定成员占的二进制位数：
+```C++
+typedef unsigned int Bit;
+class File {
+    Bit mode: 2;
+    Bit modified: 1;
+    // ...
+public:
+    enum modes { READ = 01, WRITE = 02, EXECUTE = 03 };
+    File &open(modes);
+    // ...
+};
+```
+类的内部连续定义的位域可能会被压缩在同一个整数的相邻位。如何压缩是与机器相关的。\
+取地址运算符（&）无法作用于位域。
+
+通常使用位运算符操作位域。通常类也会定义一组内联的成员函数以检验或设置位域的值。
+
+### 19.8.2 volatile限定符
+直接处理硬件的程序可能包含值由程序之外的过程控制的数据元素。这种对象应该被声明为volatile，告诉编译器该对象不能被优化。
+```C++
+volatile Task* curr_task; // 指向一个volatile对象
+volatile int arr[10]; // 每个元素都是volatile
+volatile Screen bitmapBuf; // 每个成员都是volatile 
+```
+volatile与const互不影响。\
+只有volatile的成员函数才能被volatile的对象调用。
+
+合成的拷贝或移动构造函数以及赋值运算符不能用于volatile对象初始化或赋值。合成的成员接受的形参为常量应用，不能绑定到volatile对象上。一个类可以自定义拷贝或移动操作：
+```C++
+class A {
+public:
+    A(const volatile A&);
+    // 将volatile对象赋值给非volatile对象
+    A& operator=(volatile const A&);
+    // 将volatile对象赋值给volatile对象
+    A& operator=(volatile const A&) volatile;
+};
+```
+
+### 19.8.3 链接指示：extern "C"
+C++程序需要调用其他语言编写的函数，例如C语言函数。其他语言函数名字也需要在C++中进行声明，指定返回类型以及形参列表。编译器检查调用的方式与普通C++函数相同，生成的代码有所区别。
+```C++
+// probably appeared in <cstring>
+extern "C" size_t strlen(const char*);
+extern "C" {
+    int strcmp(const char*, const char*);
+    char* strcat(char*, const char*);
+}
+
+// 可以直接应用于整个头文件
+// 头文件中所有普通函数声明都被认为是链接指示的语言编写的
+// 链接指示可以嵌套，如果头文件中包含链接指示则不受影响
+extern "C" {
+    #include <string.h>
+}
+```
+指向其他语言编写的函数的指针必须与函数本身使用相同的链接指示。一个指向C函数的指针不能在初始化或赋值操作后指向C++函数，反之亦然：
+```C++
+void (*pf1)(int);
+extern "C" void (*pf2)(int);
+pf1 = pf2; // 错误，pf1和pf2类型不相同
+```
+链接指示对作为返回类型或者形参类型的函数指针也有效：
+```C++
+// f1为一个C函数，形参为指向C函数的指针
+extern "C" void f1(void(*) (int));
+
+// 给C++函数传入C函数指针需要使用类型别名
+extern "C" typedef void FC(int);
+void f2(FC*);
+```
+如果在C和C++编译同一个源文件，可以利用预处理器__cplusplus变量：
+```C++
+#ifdef __cplusplus
+extern "C"
+#endif
+int strcmp(const char*, const char*);
+```
+C语言不支持重载函数，因此一个C链接指示只能说明重载函数中的一个。使用类类型形参的C++函数只能在C++程序中调用。
