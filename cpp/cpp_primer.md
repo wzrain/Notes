@@ -1457,6 +1457,94 @@ f(B); // call f(int)
 f(uc); // call f(unsigned char)
 ```
 
+## 19.4 类成员指针
+成员指针指向类的成员。类的静态成员不属于任何对象，指向静态成员的指针与普通指针没有区别。成员指针类型包含类的类型和成员类型，初始化时可以指向类的某个成员但是不指定该成员所属的对象，对象可以在使用时提供。
+
+### 19.4.1 数据成员指针
+```C++
+class A {
+public:
+    char get() const;
+    char get(int a, int b) const;
+    char get_cursor() const;
+private:
+    string contents;
+};
+
+const string A::*pdata; // 可以指向A类的const string成员
+pdata = &A::contents;
+
+A a, *b = &a;
+auto s = a.*pdata; // 解引用pdata得到a的contents成员
+s = b->*pdata; // 获得b所指对象的contents成员
+```
+成员指针指向成员而非实际数据，使用的时候需要绑定到该类类型的对象上。
+
+### 19.4.2 成员函数指针
+指向成员函数的指针也需要指定目标函数的返回类型和形参列表，如果成员函数是const成员则还需要声明const限定符。如果成员重载，则需要显式指定函数类型：
+```C++
+auto pf = &A::get_cursor; // 指向A的某个常量成员函数，该函数不接受任何实参，返回一个char
+char (A::*pf2)(int, int) const;
+pf2 = &A::get;
+
+A a, *b = &a;
+char c1 = (b->*pf)();
+char c2 = (a.*pf2)(0, 0);
+```
+可以通过类型别名将成员函数指针像其他类一样使用：
+```C++
+using Action = char(A::*)(int, int) const;
+A& action(A&, Action = &A::get); // 第二个参数为Action类，默认实参为&A::get
+
+A aa;
+action(aa); // 使用默认实参
+
+class A {
+public:
+    // ...
+    A& up();
+    A& down();
+
+    using Action = A& (A::*)()
+
+    A& move(int i);
+private:
+    static Action Menu[]; // 函数表，保存每个对应函数的指针
+};
+
+A& A::move(int i) {
+    return (this->*Menu[i])();
+}
+```
+
+### 19.4.3 将成员函数用作可调用对象
+想通过成员函数指针进行函数调用，首先需要利用运算符.\*或者->\*绑定至特定对象，因此成员函数指针不是可调用对象。\
+可以使用function生成可调用对象。
+```C++
+auto fp = &string::empty;
+find_if(vec.begin(), vec.end(), fp); // 错误，find_if内部调用if (fp(*it))，会产生调用错误
+function<bool (const string&)> fcn = &string::empty; // function将fcn(*it)转换为((*it).*p)()
+```
+这里function需要显式指定函数类型，其中函数第一个形参通常为相应对象的类型（即成员函数所属的类）。
+
+可以使用mem_fn推断成员类型：
+```C++
+find_if(vec.begin(), vec.end(), mem_fn(&string::empty()))
+
+auto f = mem_fn(&string::empty); // f接受一个string或者string*，不需要像function里一样显式指定
+f(*vec.begin()); // 使用.*调用
+f(&vec[0]); // 使用->*调用
+```
+
+还可以使用bind生成可调用对象：
+```C++
+find_if(vec.begin(), vec.end(), bind(&string::empty, _1));
+
+auto f = bind(&string::empty, _1);
+f(*vec.begin()); // 使用.*调用
+f(&vec[0]); // 使用->*调用
+```
+
 ## 19.8 固有的不可移植的特性
 不可移植特性指因机器而异的特性，含有不可移植特性的程序转移到另一台机器上时通常需要被重新编写。例如算术类型大小在不同机器上不同。
 ### 19.8.1 位域
