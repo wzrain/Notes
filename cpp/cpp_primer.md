@@ -1387,10 +1387,10 @@ new表达式执行时首先调用operator new或者operator new[]标准库函数
 类型nothrow_t定义在new头文件中，同时定义了一个名为nothrow的const对象，用户可通过此对象请求new的非抛出异常版本。与析构函数类似，operator delete也不允许抛出异常，重载时需要noexcept。\
 此运算符函数定义为类成员时是隐式静态的，因为operator new用在对象构造之前，operator delete用在对象销毁之后，而且它们不能操纵任何数据成员。\
 operator new必须返回void*，第一个形参必须是size_t且该形参不能含有默认实参。operator new的该形参指定对象所需的字节数，operator new[]的该形参指定数组所有元素所需的空间。\
-自定义operator new可以提供额外的形参，这时使用new的定位形式，将实参传给新增的形参。第二个实参为void*的operator new不能被用户重载。\
-operator delete返回void，第一个形参类型必须是void*。将operator delete定义为类的成员时该函数可以包含另外一个类型为size_t的形参，初始值为第一个形参所指对象的字节数，此形参可用于删除继承体系中的对象，如果基类有一个虚析构函数，则传递给operator delete的字节数将因动态类型有所区别。
+自定义operator new可以提供额外的形参，这时使用new的定位形式，将实参传给新增的形参。第二个实参为void\*的operator new不能被用户重载。\
+operator delete返回void，第一个形参类型必须是void\*。将operator delete定义为类的成员时该函数可以包含另外一个类型为size_t的形参，初始值为第一个形参所指对象的字节数，此形参可用于删除继承体系中的对象，如果基类有一个虚析构函数，则传递给operator delete的字节数将因动态类型有所区别。
 
-可以使用malloc和free函数，malloc函数接受size_t表示待分配字节数，返回指向分配空间的指针。返回0表示分配失败。free函数接受void*，是malloc返回的指针的副本，free将相关内存返回给系统。free(0)无意义。
+可以使用malloc和free函数，malloc函数接受size_t表示待分配字节数，返回指向分配空间的指针。返回0表示分配失败。free函数接受void\*，是malloc返回的指针的副本，free将相关内存返回给系统。free(0)无意义。
 ```C++
 void* operator new(size_t size) {
     if (void* mem = malloc(size)) {
@@ -1408,6 +1408,54 @@ void operator delete(void* mem) noexcept { free(mem); }
 传给定位new表达式的指针无需是operator new分配的内存，但是
 传给construct的指针必须是同一个allocator分配的空间。
 
+## 19.3 枚举类型
+可使用enum class（或struct）定义限定作用域的枚举类型。不限定作用域的枚举类型省略掉关键字class（或struct），枚举类型名字可选。
+```C++
+enum class peppers {red, yellow, green};
+enum color {red, yellow, green};
+enum stoplight {red, yellow, green}; // 错误，重复定义枚举成员
+
+color eyes = green;
+peppers p = green; // 错误，peppers枚举成员不在有效作用域中
+peppers p2 = peppers::red;
+```
+默认情况下枚举值从0开始，依次加1，不过可以为特定枚举成员指定专门的值，不同枚举成员可以有相同枚举值。没有指定则默认为之前枚举成员的值加1。\
+枚举成员是const，因此初始化枚举值时需要常量表达式。可以定义枚举类型的constexpr变量，也可以将一个枚举类型作为switch表达式，非类型模板形参等等。
+
+初始化enum对象或者赋值必须使用该类型的一个枚举成员或者另一个对象。不限定作用域的枚举类型对象可以自动转换成整型。
+```C++
+enum class open_modes {a, b, c};
+open_modes om = 2; // 错误
+open_modes om = open_modes::c;
+
+int j = color::red;
+int i = peppers::red; // 错误
+```
+
+新标准中可以在enum名字后加上冒号以及表示此enum的类型。默认情况下限定作用域的enum成员类型是int，不限定作用域不存在默认类型。
+```C++
+enum intValues : unsigned long long {
+    charType = 255, shortType = 65535, intType = 65535,
+    longType = 4294967295UL,
+    longlongType = 18446744073709551615ULL
+};
+```
+
+新标准中可以提前声明enum，不限定作用域必须指定成员类型：
+```C++
+enum intValues : unsigned long long;
+enum class open_modes;
+```
+
+枚举值可以用unsigned char来作为底层类型，但是不管底层类型如何，对象和枚举成员最起码会提升为int。
+```C++
+enum Tokens { A = 128, B = 129 };
+void f(unsigned char);
+void f(int);
+unsigned char uc = B;
+f(B); // call f(int)
+f(uc); // call f(unsigned char)
+```
 
 ## 19.8 固有的不可移植的特性
 不可移植特性指因机器而异的特性，含有不可移植特性的程序转移到另一台机器上时通常需要被重新编写。例如算术类型大小在不同机器上不同。
