@@ -602,3 +602,58 @@ struct redisServer {
 };
 ```
 执行AOF文件的伪客户端会在AOF载入完成后被关闭。
+
+# Chapter 14 服务器
+## 14.1 命令请求的执行过程
+客户端将命令转换成协议格式，连接到服务器套接字，将协议格式的命令发送给服务器。服务器调用命令请求处理器，读取命令请求，保存至客户端状态的输入缓冲区。之后对输入缓冲区中的命令进行分析，提取命令参数以及参数个数，保存到argc和argv属性中。之后调用命令执行器，执行命令。\
+命令执行器根据客户端argv[0]参数在命令表中查找指定命令，并保存到客户端状态cmd属性中。cmd属性为redisCommand结构，包括命令名称，命令实现函数的指针proc，命令参数个数（如果为负数则表明参数数量大于等于该负数的绝对值），命令的属性（读命令、写命令、命令会占用大量内存等等），服务器执行该命令的次数、执行命令耗费的总时长。\
+之后命令执行器执行一些预备操作。检查cmd指针是否为NULL，如果为NULL则返回错误表明用户输入的指令找不到对应实现。根据cmd的参数个数属性检查输入参数是否正确。检查客户端是否通过验证。如果打开maxmemory功能则检查服务器内存占用情况，有需要时进行内存回收，如果内存回收失败则向客户端返回错误。如果上一次执行BGSAVE出错且stop-writes-on-bgsave-error功能打开，且即将执行的命令为写命令，则返回错误。如果客户端正在用SUBSCRIBE订阅频道或者PSUBSCRIBE命令订阅模式，则服务器只会执行SUBSCRIBE、PSUBSCRIBE、UNSUBSCRIBE、PUNSUBSCRIBE命令。如果服务器正在数据载入，那么命令标志必须带有l标志（例如INFO、SHUTDOWN、PUBLISH等），否则被拒绝。如果客户端正在执行事务，则服务器只会执行EXEC、DISCARD、MULTI、WATCH命令，其他命令都会放入事务队列。如果服务器打开监视器功能则即将执行的命令信息会被发送给监视器。复制或集群模式下还有更多预备操作。\
+之后调用client->cmd->proc(client)执行命令实现函数。该函数产生命令回复，保存在输出缓冲区中，并为客户端套接字关联命令回复处理器，将命令回复返回给客户端。\
+之后服务器执行一些后续工作。如果服务器开启慢查询日志，则慢查询日志模块会检查是否需要为刚执行的命令请求添加一条新的日志。更新被执行命令的redisCommand的总时长属性以及执行次数属性。AOF持久化模块会将刚才执行的命令写入AOF缓冲区。如果从服务器正在复制当前服务器，则刚才执行的命令被传播给所有服务器。\
+当客户端套接字可写时，命令回复处理器将输出缓冲区中的命令回复发送给客户端，发送完毕后命令回复处理器清空输出缓冲区。\
+客户端收到协议格式的命令回复后，将回复转换成人类可读的格式打印。
+
+## 14.2 serverCron函数
+serverCron函数默认每隔100ms执行一次。该函数负责管理服务器资源，保持服务器自身良好运转。\
+```C++
+struct redisServer {
+    // ...
+    time_t unixtime;
+    long long mstime;
+
+    unsigned lruclock:22;
+ 
+    long long ops_sec_last_sample_time; // 上一次抽样时间
+    long long ops_sec_last_sample_ops; // 上一次抽样时服务器已经执行的命令数量
+    long long ops_sec_samples[REDIS_OPES_SEC_SAMPLES]; // 环形数组记录之前的抽样结果
+    int ops_sec_idx; // 数组索引
+
+    size_t stat_peak_memory;
+
+    int aof_rewrite_scheduled;
+
+    pid_t rdb_child_pid;
+    pid_t aof_child_pid;
+
+    int cronloops
+};
+```
+为了减少通过系统调用获取当前时间的次数，redisServer结构的unixtime和mstime属性被用作时间缓存。serverCron更新该缓存，不过由于100ms一次，精确度不高，只用于打印日志、计算上线时间等功能。对于过期时间、慢查询日志等服务器还是会执行系统调用。\
+lruclock属性保存了LRU时钟，也是时间缓存的一种，服务器计算键的空转时间的时候用lruclock属性减去对象的lru属性。serverCron函数每10s对lruclock属性更新。\
+sreverCron函数中的trackOperationsPerSecond函数每100ms估算服务器在最近一秒钟处理的命令请求数量，可以用INFO stats查看。根据当前已经执行的命令数量以及上次抽样时执行的命令数量的差值以及时间差值可以计算两次之间执行了多少命令，从而估算平均每毫秒的命令个数。该估计值被放到环形数组中。\
+每次serverCron函数会查看当前内存用量是否大于内存峰值，是的话记录到stat_peak_memory中，可以用INFO memory查看。\
+serverCron函数会对shutdown_asap属性检查，该属性会在服务器接到SIGTERM信号时打开。如果打开则关闭服务器，关闭前会进行RDB持久化操作。\
+serverCron会执行clientsCron函数，对一定数量的客户端检查，如果连接超时则释放客户端，如果输入缓冲区大小过长则释放当前输入缓冲区并重新创建一个默认大小的缓冲区。\
+serverCron会执行databasesCron函数，对一部分数据库检查，删除过期键，对字典进行收缩操作等等（第9章）。\
+BGSAVE执行期间BGREWRITEAOF命令被延迟，aof_rewrite_scheduled记录AOF重写是否被延迟。每次serverCron哈数会检查BGSAVE和BGREWRITEAOF是否正在执行，如果都没有且aof_rewrite_scheduled为1则执行被延迟的BGREWRITEAOF命令。、
+如果执行BGSAVE的子进程id或者执行BGREWRITEAOF命令的子进程id不为-1，则serverCron执行wait3函数，检查子进程是否有信号到达。如果有则表明RDB文件生成完毕或者AOF重写完毕，则服务器需要执行对应的后续操作，例如替换RDB文件或者AOF文件。如果两个子进程id都为-1，则程序查看是否有AOF重写被延迟，如果有则开始新的重写操作，之后检查服务器自动保存条件是否满足，如果满足且服务器没有进行其他持久化操作，则服务器开始新的BGSAVE操作，之后检查AOF重写条件是否满足，如果满足且没有其他持久化操作则开始新的BGREWRITEAOF操作。\
+如果AOF缓冲区有待写入的数据，serverCron函数会负责将缓冲区中的内容写到AOF文件中（第11章）。\
+serverCron函数会关闭输出缓冲区超出限制的客户端（第13章）。\
+每次serverCron函数执行，cronloops属性自增1。复制模块中“serverCron函数每执行N次就执行指定代码”的逻辑需要该属性。
+
+## 14.3 初始化服务器
+初始化服务器首先创建一个redisServer类型的实例，该初始化由redis.c/initServerConfig函数完成，该函数设置服务器运行ID、默认运行频率、默认配置文件路径、运行架构、端口号、持久化条件、LRU时钟、命令表等。\
+用户可以通过给定配置参数或者指定配置文件来修改默认配置属性。服务器会对redisServer结构进行更新。\
+initServer函数会初始化clients链表、db数组、pubsub_channels用于保存频道订阅信息、pubsub_patterns用于保存模式订阅信息、Lua环境属性lua、慢查询日志slowlog。这些数据结构需要之前的配置选项才能初始化。此外initServer还设置进程信号处理器、创建共享对象（比如经常用到的字符串、包含1-10000整数的字符串等）、打开服务器监听端口、为监听套接字关联连接事件处理器、为serverCron函数创建时间事件、打开或者创建AOF文件、初始化后台I/O模块。\
+如果服务器启用AOF持久化功能则使用AOF还原数据库状态，否则使用RDB文件还原。\
+之后服务器开始执行事件循环，开始处理客户端请求。
