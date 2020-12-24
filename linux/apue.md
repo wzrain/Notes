@@ -138,3 +138,104 @@ int remove(const char* pathname);
 ## 4.17 符号链接
 符号链接避开硬链接的限制，如要求链接和文件位于同一文件系统中，且只有超级用户可以创建指向目录的硬链接。\
 符号链接可能在文件系统中引入循环，例如在目录中创建一个指向目录本身的符号链接，这时大多数查找路径名的函数都会出错。这种循环可以通过unlink符号链接消除，因为unlink的参数为符号链接时unlink不会“follow”该符号链接，即只处理符号链接本身的文件而不处理符号链接指向的文件。如果是硬链接的话unlink就无法消除该循环，因此link函数不允许构造指向目录的硬链接。
+
+# Chapter 14 高级I/O
+## 14.2 非阻塞I/O
+低速系统调用可能使得进程永远阻塞，例如文件类型数据不存在时读操作会永久阻塞调用者。非阻塞I/O使得open、read、write等操作不会永远阻塞，如果出错则立即返回。可以通过指定对应的文件描述符为O_NONBLOCK标志，如果描述符已打开还可以调用fcntl设置该标志。\
+非阻塞I/O通过轮询的形式不断尝试对应的系统调用，不成功则返回错误。
+
+## 14.3 记录锁
+一个进程正在读或者修改文件的某个部分时，记录锁（record locking）可以阻止其他进程修改同一文件区。更合适的术语是字节范围锁（byte-range locking）。
+
+fcntl函数可以实现记录锁功能，对应的cmd参数为F_GETLK、F_SETLK、或者F_SETLKW。第三个参数为指向一个flock结构的指针：
+```C++
+struct flock {
+    short l_type; // F_RDLCK, F_WRLCK, F_UNLCK
+    short l_whence; // SEEK_SET, SEEK_CUR, SEEK_END
+    off_t l_start; // offset in bytes, related to l_whence
+    off_t l_len; // length in bytes, 0 means lock to EOF
+    pid_t l_pid; // returned with F_GETLK
+};
+```
+l_start和l_whence组合表示锁区域的起始字节偏移量（与lseek类似，通过这两个参数以及当前偏移量计算需要的偏移量）。l_len为加锁的范围，为0则表示不论写多少数据锁的范围都直到文件末尾。\
+多个进程对于一个给定的字节可以共享一个读锁（F_RDLCK），但是只能有一个进程享有写锁（F_WRLCK）。如果字节上已经有读锁则不能再加写锁。如果进程连续对某一个区间加不同的锁，则最后一次的锁最终有效。加读锁时描述符必须是读打开，写锁必须是写打开。\
+fcntl函数参数为F_GETLK时判断flock指针参数描述的锁是否会被存在的锁排斥，那么flock指针的内容被重写为该存在的锁的信息。如果没有存在的锁排斥，那么flock指针的l_type被改为F_UNLCK。如果是本进程自己加的锁则不会被报告。如果参数为F_SETLK，则设置对应的锁，如果不成功则返回错误。F_SETLKW是F_SETLK的阻塞版本，如果加锁失败则对应进程休眠，如果锁可用或者休眠被信号中断则进程被唤醒。如果某一文件区间频繁被加读锁，那么如果某个进程想要加写锁，可能需要等待很长的时间。\
+释放锁时如果释放字节区间中间的某一部分，则加锁的区域会自动分割成两部分，内核将维护两把锁。
+
+锁与进程和文件本身关联。因此进程终止时建立的锁全部释放，并且描述符被关闭时，该进程通过此描述符引用的文件本身被加的锁都会被释放。因此如果通过dup该描述符（多个描述符指向一个文件表项）或者open同一文件路径（每个描述符指向单独的文件表项，这些文件表项指向同一个v-node）使得多个描述符关联同一文件，那么关闭一个的时候对应文件的锁就会被释放。\
+fork出来的子进程不继承父进程的锁。子进程通过fork继承来的描述符需要调用fcntl才能获得自己的锁。执行exec后新程序可以继承原程序的锁，如果一个描述符是close-on-exec，则exec后对应的文件的锁被释放。\
+FreeBSD的实现中v-node项包含指向lockf结构的指针，用来描述文件对应的锁的列表。\
+给相对于文件尾端的字节范围加锁时，不能先调用fstat得到文件长度再去计算偏移量并且加锁，因为此操作不是原子的。事实上相对于SEEK_SET指定绝对偏移量，使用SEEK_CUR或者SEEK_END对相对某个点指定偏移量时都有可能出现相似问题，因为当前偏移量和文件尾端不断变化，不过变化不影响现有锁的状态，因此内核记录对应的锁时必须独立于这些相对位置。
+
+## 14.4 I/O多路转接
+当同时读写多个文件描述符时，不能阻塞任意一个，因为不知道哪个输入会得到数据。可以使用非阻塞I/O轮询，不过浪费大量CPU时间。或者使用异步I/O，进程通知内核当描述符准备好I/O时用信号通知。但是可移植性不佳，且可用信号个数可能远远小于文件描述符数量。\
+I/O多路转接构造一张描述符列表，通过调用函数，直到描述符中的一个准备好时该函数才返回，返回时告知进程哪些描述符已经准备好。
+
+### 14.4.1 函数select和pselect
+```C++
+int select(int maxfdpl, fd_set *restrict readfds, fd_set *restrict writefds, fd_set *restrict exceptfds, struct timeval *restrict tvptr);
+```
+该函数返回就绪的描述符数目，超时返回0，出错返回-1。tvptr指定愿意等待的时间长度，为NULL则表示永远可以等待，0则表示不等待，测试所有描述符后直接返回。\
+三个fd_set结构为指向描述符集的指针，说明了可读、可写、或者异常条件的描述符集合。可以将fd_set看做字节数组，每个可能的描述符为1位。如果三个fd_set都为NULL，则select函数相当于比sleep的时间更精确的一个等待函数。\
+maxfdpl表示我们关心的最大描述符加1。可以直接设置为FD_SETSIZE（通常为1024），不过这个常量通常过大，因为一个应用可能只需个位数的描述符。这个参数使得内核只用在指定范围内寻找打开的描述符。\
+关于描述符就绪，readfds中的描述符就绪表示read操作不会阻塞，writefds中的write操作不会阻塞，exceptfds中的描述符的异常条件正在pending。普通文件的描述符总是返回就绪。到达文件尾端时select认为该描述符可读，调用read返回0。\
+pselect的时间精度更高，超时值被声明为const（pselect不会改变此值），且参数包含信号屏蔽字sigmask。
+
+### 14.4.2 函数poll
+```C++
+int poll(struct pollfd fdarray[], nfds_t nfds, int timeout);
+
+struct pollfd {
+    int fd;
+    short events; // events of interest on fd
+    short revents; // events occurred on fd
+};
+```
+poll不为每个条件（读、写、异常）构造单独的描述符集合，而是通过pollfd结构的数组，每个数组元素指定一个描述符编号以及感兴趣的条件。数组元素个数由nfds指定。timeout为-1则永远等待，0则不等待。一个描述符被挂断（POLLHUP，revents中返回）后不能再被写，但是仍有可能被读。
+
+## 14.5 异步I/O
+
+## 14.6 函数readv和writev
+```C++
+ssize_t readv(int fd, const struct iovec *iov, int iovcnt);
+ssize_t writev(int fd, const struct iovec *iov, int iovcnt);
+
+struct iovec {
+    void *iov_base;
+    size_t iov_len;
+};
+```
+这两个函数用于在一次调用中读写多个非连续缓冲区。iov数组的元素个数由iovcnt指定。每个iov_base指向一个缓冲区。writev返回输出的字节总数，通常等于所有缓冲区长度之和。readv返回读到的字节总数。\
+如果复制缓冲区后调用一次write，当数据增加时效率要低于writev，因为write需要将多个缓冲区复制到一个staging缓冲区，之后write调用时内核将该缓冲区的数据复制到内核缓冲区。writev调用中内核则直接将数据复制进自己的缓冲区，因此复制工作较少。
+
+## 14.7 函数readn和writen
+```C++
+ssize_t readn(int fd, void* buf, size_t nbytes);
+ssize_t writen(int fd, void* buf, size_t nbytes);
+```
+对于管道、FIFO以及某些设备（终端和网络等），一次read操作返回的数据少于要求的数据，write的返回值可能少于指定输出的字节数（例如内核输出缓冲区变满）。上述两个函数用于处理这种情况，按需多次调用read和write直至读写数据量达到要求。
+
+## 14.8 存储映射I/O
+存储映射I/O将磁盘文件映射到存储空间的缓冲区上，这样从缓冲区取数据相当于读文件中的相应字节，将数据存入缓冲区相当于自动写入文件。这样I/O可以在不使用read和write时执行。
+```C++
+void *mmap(void* addr, size_t len, int prot, int flag, int fd, off_t off);
+```
+addr指定存储区的起始地址，通常为0，表示系统选择起始地址。函数返回值也是起始地址。fd参数为被映射文件的描述符。映射前需要先打开该文件（分配文件描述符、文件表项等等）。off和len为要映射的字节在文件中的偏移量以及映射区域长度。prot指定映射区的读写执行权限，该权限不得超过open的访问权限。\
+映射存储区可以位于堆和栈之间。flag可以设置为MAP_FIXED，表明返回值必须等于addr，这不利于移植性（将addr设为0可获得最大可移植性）。MAP_SHARED表明对映射缓冲区的存储操作相当于直接write对应文件。MAP_PRIVATE表明存储操作会创建一个对应的文件的私有副本，后来对映射区的引用都是引用该副本（可以用于调试）。\
+off和addr的值通常需要是虚拟页的长度的倍数，此参数可以用带_SC_PAGESIZE或者_SC_PAGE_SIZE的sysconf函数得到。如果映射区长度不是页长度的整数倍，那么没被填满的页用0填满。如果要通过修改这些用于填充页的字节来修改文件，需要先加长文件。\
+与映射区相关的信号有SIGSEGV和SIGBUS，SIGSEGV表示进程试图访问不可用的存储区，例如试图向只读映射区存储数据。如果映射区某个部分访问时已经不存在，则产生SIGBUS信号，例如用文件长度映射了一个文件，但是另一个进程将该文件阶段，则试图访问截断部分会接收到SIGBUS信号。\
+子进程可以通过fork继承存储映射区（因为子进程复制父进程地址空间），新程序不通过exec继承存储映射区。
+
+```C++
+int mprotect(void *addr, size_t len, int prot);
+int msync(void *addr, size_t len, int flags);
+```
+调用mprotect更改现有映射的权限。\
+如果修改的页通过MAP_SHARED映射，那么修改并不立即写回文件，写回脏页的时间由守护进程决定。可以调用msync将脏页冲洗到被映射的文件中，功能类似于fsync。如果映射为私有的，则对应的文件本身不会被修改。可以通过flag参数对如何冲洗存储区进行设置，如果希望写操作在返回前完成，则设置为MS_SYNC。\
+```C++
+int munmap(void *addr, size_t len);
+```
+进程终止时会自动解除存储映射区的映射，或者直接调用munp函数解除映射关系。关闭对应的文件描述符不会解除映射关系。调用munmap不会使得映射区的内容被写入文件。对于MAP_SHARED，写入文件是由内核的算法控制的。对于MAP_PRIVATE，更改在映射区解除映射后被丢弃。
+
+可以用过fstat得到文件长度，作为mmap的参数。对于输出文件，可以通过ftruncate函数设置长度，如果不设置，mmap依然会成功，但是对对应映射区的第一次引用会产生SIGBUS信号。\
+可以通过mmap和memcpy结合来复制文件，相比于read和write执行了较少的系统调用次数。read和write将数据从内核缓冲区复制到应用缓冲区，再复制回内核缓冲区。mmap和memcpy直接将数据从映射到地址空间的一个内核缓冲区复制到另一个内核缓冲区，这个复制过程是作为一个页错误的handler执行的，因为我们会引用不存在的页（每次读或者写一个新的页都会产生页错误。这样在系统调用和额外的复制操作以及页错误处理之间产生了一个tradeoff。
