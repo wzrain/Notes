@@ -724,3 +724,100 @@ typedef struct redisClient {
 命令传播阶段，从服务器默认每秒一次向主服务器发送REPLCONF ACK \<replication_offset>，其中replication_offset为当前从服务器复制偏移量，用于检测网络连接状态，实现min-slaves选项以及检测命令丢失。如果主服务器超过一秒没有收到REPLCONF ACK命令则表明网络连接有问题。\
 Redis的min-slaves-to-write和min-slaves-max-lag选项防止主服务器在不安全的情况下执行写命令。如果从服务器数量少于min-slaves-to-write或者每个从服务器延迟大于min-slaves-max-lag时，主服务器将拒绝执行写命令。\
 如果主服务器发现REPLCONF ACK传来的复制偏移量小于自己的复制偏移量，则表明写命令可能半路丢失，主服务器根据对应复制偏移量在复制积压缓冲区中找到从服务器缺少的数据，重新发送给从服务器。与部分重同步不同，这一补发缺失的写命令操作在没有断线的情况下执行。
+
+# Chapter 16 Sentinel
+由一个或多个Sentinel实例组成的Sentinel系统监视任意多个主服务器以及对应的从服务器，当被监视的主服务器下线时，自动将某个从服务器升级为新的主服务器。\
+主服务器下线时长超过用户设定的上限时，Sentinel系统挑选其中的一个从服务器升级为主服务器。之后Sentinel系统向所有从服务器发送新的复制指令，使它们成为新的主服务器的从服务器。所有从服务器开始复制新的主服务器时故障转移操作执行完毕。当下线的原主服务器上线时Sentinel将其设置为新的主服务器的从服务器。
+
+## 16.1 启动并初始化Sentinel
+使用redis-sentinel *sentinel.conf*或者redis-server *sentinel.conf* --sentinel启动sentinel。\
+Sentinel本质上是一个特殊模式的服务器，因此启动Sentinel首先初始化一个普通服务器，具体步骤与第14章类似。不过初始化Sentinel不需要载入RDB或者AOF文件。Sentinel模式下服务器不使用持久化命令、数据库键值对方面的命令（SET、DEL、FLUSHDB）、事务命令等。复制命令（SLAVEOF）、PUBLISH命令只能在Sentinel内部使用。\
+之后将一部分普通服务器使用的代码替换成Sentinel专用代码，例如服务器端口、命令表（sentinel.c/sentinelcmds），并且INFO命令的实现也不同。上述不使用的命令是因为命令表中没有载入对应的命令。PING、SENTINEL、INFO、SUBSCRIBE、UNSUBSCRIBE、PSUBSCRIBE、PUNSUBSCRIBE是客户端可以对Sentinel执行的全部命令。\
+接下来服务器初始化一个sentinel.c/sentinalState结构，保存服务器中所有和Sentinel功能有关的状态（其余一般状态仍由redisServer结构保存）。
+```C++
+struct sentinelState {
+    uint64_t current_epoch; // 用于故障转移
+
+    // 所有被Sentinel监视的主服务器，键为主服务器的名字，值为指向sentinelRedisInstance指针
+    dict* masters;
+
+    int tilt; // 是否进入TILT模式
+
+    int running_scripts; // 正在执行的脚本数量
+
+    mstime_t tilt_start_time; // 进入TILT模式的时间
+
+    mstime_t previous_time; // 最后一次执行时间处理器的时间
+
+    list *scripts_queue; // FIFO队列，包含要执行的用户脚本
+} sentinel;
+
+typedef struct sentinelRedisInstance {
+    int flags; // 记录实例类型及当前状态
+
+    char *name; // 实例名字，主服务器名字由用户在配置文件设置，从服务器以及Sentinel名字由Sentinel自动设置，格式为ip:port
+
+    char *runid; // 运行id
+
+    uint64_t config_epoch; // 用于故障转移
+
+    sentinelAddr *addr; // 实例的地址
+    
+    mstime_t down_after_period; // 无响应多久后被判断为主观下线
+
+    int quorum; // 判断该实例客观下线所需支持投票数量
+
+    int parallel_syncs; // 故障转移时同时对新的主服务器同步的从服务器数量
+
+    mstime_t failover_timeout; // 刷新故障转移状态的最大时限
+
+    // ...
+} sentinelRedisInstance;
+
+typedef struct sentinelAddr {
+    char *ip;
+    int port;
+} sentinelAddr;
+```
+Sentinel的初始化引发对masters字典的初始化，根据被载入的Sentinel配置文件进行。\
+最后还要创建向被监视的主服务器的链接，Sentinel为主服务器的客户端，可以向主服务器发送命令，从命令回复中获取信息。Sentinel向每个被监视的服务器创建两个异步网络连接，命令连接专门用于向主服务器发送命令，订阅连接订阅主服务器的__sentinel__:hello频道。目前的发布订阅功能中，被发送的信息不保存在Redis服务器中，如果信息发送时接收信息的客户端不在线或者断线，则信息丢失，因此Sentinel专门用一个连接接收该频道的消息。由于需要多个连接，因此创建异步连接。
+
+## 16.2 获取主服务器信息
+Sentinel每十秒向被监视的主服务器发送INFO命令，通过回复获取主服务器当前信息，包括主服务器本身的信息，如运行id等，以及主服务器的从服务器信息，包括从服务器的ip地址和端口号，从而使得Sentinel可以自动发现从服务器。主服务器重启后运行id变化，Sentinel可以通过INFO的返回进行相应的更新。\
+从服务器信息用于更新主服务器sentinelRedisInstance结构的slaves字典，该字典的键为自动设置的从服务器名字，值是从服务器对应的sentinelRedisInstance结构。主服务器对应结构的flags属性为SRI_MASTER，从服务器为SRI_SLAVE。
+
+## 16.3 获取从服务器信息
+Sentinel在获取到新的从服务器信息后除了会新建相应的sentinelRedisInstance结构外，还会创建从服务器的命令连接和订阅连接，并每十秒通过命令连接向从服务器发送INFO命令，得到从服务器的运行ID、角色、主服务器的ip地址和端口号、主从服务器连接状态、从服务器的优先级、复制偏移量等，这些同样保存于从服务器的sentinelRedisInstance结构中。
+
+## 16.4 向主服务器和从服务器发送信息
+默认情况下Sentinel每两秒一次向主服务器和从服务器发送PUBLISH命令，向服务器的__sentinel__:hello频道发送信息，包含Sentinel自己的ip地址、端口号。运行ID、当前的配置epoch，以及主服务器的信息（如果Sentinel监视从服务器，则是当前从服务器正在复制的主服务器的信息）。
+
+## 16.5 接收来自主服务器和从服务器的频道信息
+Sentinel与服务器建立订阅连接后Sentinel向服务器发送SUBSCRIBE \_\_sentinel__:hello命令，订阅服务器的__sentinel__:hello频道，直到连接断开。对于监视同一个服务器的多个Sentinel，一个Sentinel发送的信息会被其他Sentinel接收到，用于更新其他Sentinel对发送信息Sentinel的认知。当一个Sentinel从该频道中收到信息时，Sentinel会分析信息中包含的Sentinel信息，如果是自己发送的则丢弃，否则说明是其他Sentinel发来的，接收该信息的Sentinel可以根据信息更新主服务器的实例结构。
+
+### 16.5.1 更新sentinels字典
+主服务器的sentinelRedisInstance中包含sentinels字典，包含所有监视这个主服务器的Sentinel信息。字典的键为Sentinel的名字，格式为ip:port，值为Sentinel对应的sentinelRedisInstance结构。\
+当一个Sentinel接收到其他Sentinel发来的信息时，接收信息的Sentin得到其他Sentinel的ip地址、端口号、运行ID、配置epoch以及正在监视的主服务器的参数（ip地址、端口号、运行ID、配置epoch）。之后Sentinel在masters字典中找到对应的主服务器，查看sentinels字典中有没有发送此信息的Sentinel信息，如果有则更新，否则创建新的对应该Sentinel的实例。这样监视同一个主服务器的多个Sentinel可以通过发送频道信息互相发现对方。
+
+### 16.5.2 创建连向其他Sentinel的命令连接
+当Sentinel通过频道信息发现新的Sentinel时，它还会创建一个连向新的Sentinel的命令连接，这样各个Sentinel之间可以通过向其他Sentinel发送命令请求进行信息交换。Sentinel之间不创建订阅连接。
+
+## 16.6 检测主观下线状态
+默认情况下Sentinel每秒一次向所有创建了命令连接的实例（主服务器、从服务器、其他Sentinel）发送PING命令，判断其他实例是否在线。实例返回+PONG、-LOADING、-MASTERDOWN为有效回复，其他是无效回复。如果一个实例在down_after_period毫秒内一直返回无效回复，则Sentinel会将对应实例的flags打开SRI_S_DOWN，表示实例进入主观下线状态。down_after_period由用户设置的down-after-milliseconds决定，该值决定所有相关实例的主观下线标准，多个Sentinel设置的主观下线时长可能不同。
+
+## 16.7 检查客观下线状态
+Sentinel将一个主服务器判断为主观下线之后，向其他Sentinel询问，看它们是否也认为主服务器进入下线状态，当Sentinel收到足够数量的下线判断后会将服务器判断为客观下线，进行故障转移操作。\
+Sentinel向其他Sentinel发送SENTINEL is-master-down-by-addr \<ip> \<port> \<current_epoch> \<runid>命令，参数为被Sentinel判断为主观下线的主服务器的地址端口号以及Sentinel当前的配置epoch。runid可以为星号，表示命令仅用于检测主服务器客观下线的状态，或者该Sentinel的运行ID，用于选举领头Sentinel。\
+一个Sentinel接收到上述命令时，会检查对应的主服务器是否下线，返回检查结果down_state、局部领头Sentinel运行ID leader_runid（为星号则表示仅用于检查主服务器下线状态、以及局部领头Sentinel的配置epoch，用于选举领头Sentinel，如果leader_runid为星号，则epoch为0。\
+发送命令的Sentinel接收上述回复，统计其他Sentinel认为主服务器下线的数量，达到客观下线所需数量（quorum参数，不同Sentinel可能不同）时将主服务器flags属性的SRI_O_DOWN标志打开，表示主服务器进入客观下线状态。
+
+## 16.8 选举领头Sentinel
+主服务器被判断为客观下线时，监视该主服务器的各个Sentinel进行协商，选举领头Sentinel执行故障转移操作。\
+所有在线的Sentinel都有成为领头的资格，每次选举之后所有Sentinel的epoch会自增。在一个epoch里，所有Sentinel都有一次将某个Sentinel设为局部领头的机会，局部领头一旦设置在这个epoch中不能更改。每个发现主服务器客观下线的Sentinel都会要求其他Sentinel将自己设为局部领头Sentinel，这是通过在SENTINEL is-master-down-by-addr命令中的指定自己的runid作为参数实现的。局部领头Sentinel先到先得，最先发送该命令要求的Sentinel成为局部领头Sentinel。发送命令的Sentinel收到回复后查看leader_epoch参数是否与自己的一致，一致的话再对比leader_runid参数的值，如果一致则表明自己的局部领头Sentinel。每个Sentinel统计自己被多少Sentinel选举为局部领头Sentinel，如果有Sentinel被半数以上的Sentinel设置为局部领头Sentinel，则它成为领头Sentinel。如果没有产生领头Sentinel则一段时间后重新选举。
+
+## 16.9 故障转移
+故障转移操作首先挑选一个状态良好数据完整的从服务器，发送SLAVEOF no one命令，将其转换为主服务器。\
+领头Sentinel将下线主服务器的所有从服务器保存到列表中，删除所有下线或者断线的从服务器（保证剩余从服务器在线），删除五秒内没有回复过INFO命令的从服务器（保证通信正常），删除所有与已经下线的主服务器断开连接超过down-after-milliseconds * 10的从服务器（保证剩余从服务器没有过早与主服务器断开连接，表明其数据是较新的），之后将从服务器按照优先级排序，选出优先级最高的服务器，有多个优先级相同时选取复制偏移量最大的服务器（表明数据最新），如果仍相同则选运行id小的。\
+发送SLAVE no one命令后领头Sentinel每秒发送一次INFO查看从服务器的角色信息，变为master说明从服务器升级为主服务器。\
+之后领头Sentinel向其他从服务器发送SLAVEOF命令，指定新升级得到的主服务器的ip地址和端口号。\
+最后将下线的主服务器设置为新主服务器的从服务器。原来的主服务器重新上线时Sentinel向它发送SLAVEOF命令。
