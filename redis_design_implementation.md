@@ -1104,3 +1104,48 @@ typedef struct {
 ```
 其中bulk_data属性是一个字节数组，保存了channel参数和message参数，channel_len和message_len分别保存对应的长度，bulk_data的[0, channel_len)字节保存channel参数，[channel_len, channel_len + message_len)字节保存message参数。\
 如果直接广播PUBLISH命令，不符合集群“各个节点通过发送和接收消息来通信”的规则。
+
+# Chapter 18 发布与订阅
+通过执行SUBSCRIBE命令，客户端可以订阅一个或者多个频道，成为这些频道的订阅者（subscriber），每当其他客户端向频道发送消息时所有订阅者都会收到消息。\
+除了订阅频道外客户端还可以通过PSUBSCRIBE命令订阅一个或者多个模式，每当其他客户端向某个频道发送消息时，消息不仅会被发送给订阅者，还会被发送给所有与此频道相匹配的模式的订阅者。例如客户端C订阅模式"news.[ie]t"，则某个客户端PUBLISH "news.it" "hello"时，除了直接订阅"news.it"频道的客户端外，客户端C也会收到消息。
+
+## 18.1 频道的订阅与退订
+Redis将所有订阅关系保存在服务器状态的pubsub_channels字典中，字典的键为频道，值为链表，保存所有订阅该频道的客户端：
+```C++
+struct redisServer {
+    // ...
+    dict *pubsub_channels;
+    // ...
+};
+```
+每当客户端执行SUBSCRIBE命令订阅频道，服务器将客户端与频道在该字典中进行关联，如果频道有其他订阅者，则直接将新客户端加在链表尾端，否则先创建新的字典项，键为对应频道，值为空链表，再进行添加。\
+退订时通过频道名字找到对应的订阅者链表，删除对应的退订客户端的关系，如果删除后链表为空链表，则删除对应的键。
+
+## 18.2 模式的订阅与退订
+服务器将所有模式的订阅关系保存着服务器状态的pubsub_patterns属性中：
+```C++
+struct redisServer {
+    // ...
+    list *pubsub_patterns;
+    // ...
+};
+
+// pubsub_patterns每个项为如下结构
+typedef struct pubsubPattern {
+    redisClient *client; // 订阅的客户端
+    robj *pattern; // 被订阅的模式
+} pubsubPattern;
+```
+每当客户端执行PSUBSCRIBE订阅模式时，服务器新建一个pubsubPattern结构，将其添加到pubsub_patterns的表尾。\
+退订的时候服务器在链表中查找代表对应的客户端与模式的链表项并删除。
+
+## 18.3 发送消息
+客户端执行PUBLISH \<channel> \<message>时，服务器需要将消息发送给频道的所有订阅者以及订阅匹配模式的订阅者。\
+将消息发送给频道订阅者时，服务器在pubsub_channels字典中找到频道对应的订阅客户端链表，将消息发送给对应客户端。\
+将消息发送给模式订阅者时，服务器遍历pubsub_patterns链表，查找匹配的模式并将消息发送给对应的客户端。
+
+## 18.4 查看订阅信息
+PUBSUB命令为Redis 2.8新增加的命令，可以通过此命令查看频道或者模式的订阅信息。\
+PUBSUB CHANNELS [pattern]命令用于返回服务器当前被订阅的频道，pattern参数可选，如果没有pattern参数则返回所有被订阅频道，否则返回与pattern相匹配的频道。这一命令可以通过遍历pubsub_channels字典的所有键来实现。\
+PUBSUB NUMSUB [channel-1 channel-2 ... channel-n]命令接受任意个频道作为参数，返回频道的订阅者数量。这一命令通过在pubsub_channels字典中找到对应的链表，并返回链表长度来实现。\
+PUBSUB NUMPAT子命令返回被订阅的模式的数量。直接返回pubsub_paterns长度即可。
