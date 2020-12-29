@@ -1210,3 +1210,34 @@ Redis事务的运行时错误通常是由编程错误产生的，通常只出现
 Redis事务的耐久性由持久化模式决定，在无持久化模式下事务不具有耐久性。RDB持久化模式下，服务器只会在特定保存条件满足时才会执行BGSAVE命令，异步执行的BGSAVE操作不能保证数据第一时间保存到硬盘中，因此RDB持久化模式下也不具有耐久性。AOF持久化模式下，appendfsync选项为always时，程序执行命令后调用fsync函数，因此这种配置下事务具有耐久性。appendfsync为everysec或者no时数据可能丢失，因此不具有耐久性。\
 如果no-appendfsync-on-rewrite选项打开时，在执行BGSAVE或者BGREWRITEAOF命令期间服务器暂停对AOF文件同步，从而减少I/O阻塞，这时即使appendfsync为always数据也可能丢失。\
 不管Redis在什么模式下运作，在事务最后加上SAVE命令可以保证事务的耐久性，不过效率太低，不具有实用性。
+
+# Chapter 23 慢查询日志
+慢查询日志用于记录执行时间超过给定时长的命令请求，用户通过此日志监视和优化查询速度。服务器可以配置slowlog-log-slower-than指定执行时间的阈值，slowlog-max-len指定服务器最多保存多少条慢查询日志，如果日志数量达到此上限，则删除最旧的一条日志。可以使用CONFIG SET命令设置这两个选项。\
+可以使用SLOWLOG GET命令查看服务器保存的慢查询日志，每个日志项包含一个唯一id、命令执行的UNIX时间戳、命令执行的时长（微秒）、以及命令本身和命令参数。SLOWLOG GET命令本身也有可能被记录进慢查询日志。
+
+## 23.1 慢查询记录的保存
+服务器状态保存了慢查询日志相关的属性：
+```C++
+struct redisServer {
+    // ...
+    long long slowlog_entry_id; // 下一条慢查询日志的id
+    list* slowlog; // 保存所有慢查询日志的链表
+    long long slowlog_log_slower_than;
+    unsigned long slowlog_max_len;
+};
+
+typedef struct slowlogEntry {
+    long long id;
+    time_t time;
+    long long duration;
+    robj **argv;
+    int argc;
+} slowlogEntry;
+```
+slowlog_entry_id初始值为0，每创建一条慢查询日志id就会自增1。链表中每一项为一个slowlogEntry结构，对应一个慢查询日志及其对应的属性。链表使用插入表头的方式添加新日志，因此最旧的日志在表尾。
+
+## 23.2 慢查询日志的阅览和删除
+SLOWLOG GET命令通过遍历链表来打印对应的日志，用户可以指定打印个数。SLOWLOG LEN命令返回链表的长度。SLOWLOG RESET命令遍历所有日志并一一删除。
+
+## 23.3 添加新日志
+每次命令执行前后程序会记录微秒格式的时间戳，二者之差即为命令执行时长，服务器将此时长作为参数之一传递给slowlogPushEntryIfNeeded函数。该函数检查此执行时长是否超过slowlog-log-slower-than指定的上限，如果是的话就创建一个新日志，将其添加到slowlog链表表头。如果链表长度超过上限，则将多出来的日志从链表中删除。日志创建时redisServer.slowlog_entry_id的值会被增加1。
