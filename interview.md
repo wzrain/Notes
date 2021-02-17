@@ -45,6 +45,20 @@ cond.wait(locker)会调用locker的unlock函数释放锁，线程被唤醒后再
 C++还提供notify_all()函数唤醒所有等待线程。
 
 ## Linux
+### awk
+awk '{print $1,$4}' text.txt // text.txt每一行以空格或者tab分割，输出每行的第1和第4项 \
+awk -F, '{print $1,$4}' text.txt 或者 awk 'BEGIN{FS=,} {print $1,$4}' text.txt // 自定义分隔符（本例中为,） \
+awk -F '[ ,]' ... // 先使用空格分隔，再使用逗号分隔
+
+awk -va=1 '{print $1,$1+a}' text.txt // 自定义变量a \
+awk '$1>2' text.txt // 过滤第一列大于2的行
+
+### sort
+对每行进行排序，-t表示行分隔符，-k表示按照第几列排序，-n表示按照数字排序（而不是字符串），-g表示按照通用数字排序，-r表示降序，-h按照文件大小排序，-u表示去重，-o表示写回文件（不能使用重定向符>）。\
+sort -t ':' -k 3 -nr a.txt // 每行以冒号分隔后按照第3列降序数字排序\
+du -h | sort -hr // 按照文件大小排序当前文件夹文件\
+ps aux | sort -gr -k 4 | head -n 5 // 内存占用最多的5个进程
+
 
 ## Multithreading
 ### 线程交替打印
@@ -111,7 +125,10 @@ MyISAM保存了表的总行数，InnoDB没有（select count(*) from table会遍
 处理读写冲突，读操作只读取该事务开始前数据库的快照，避免脏读和不可重复读。\
 避免不可重复读的原因是，同一个事务中多个读操作均读的是快照。读提交时每个快照都会生成获取最新的视图。\
 snapshot isolation: every tuple gets an LSN, read highest LSN that is lower than the start timestamp, write check at the end whether the latest version of all written tuples is the one written (乐观锁); undo records of every modification they make, transaction is assigned a SCN (System Change Number), read blocks with an SCN
-lower than the start SCN, if a block is too new, a copy is made, and undo records applied to recreate a version with a suitable
+lower than the start SCN, if a block is too new, a copy is made, and undo records applied to recreate a version with a suitable.\
+undo日志（before image，旧数据的copy）通过ROLL_PTR指针把每一行的修改连起来。ReadView结构维护一个未提交的事务列表，以及事务id的最小最大值，表示当前事务创建时仍然没提交的事务。该当前事务读时将日志中记录的事务id与未提交事务id范围比较，如果小于最小值则说明该事务创建时此记录已经提交，可以读。如果大于最大值说明此记录在当前事务生成后才出现，不可以读（因为不知道该事务是否已经提交）。如果在之间，则如果记录的事务id在未提交事务列表里，则不可以读；如果不在未提交事务列表的话，则可以读（因为这表明在当前事务生成前有个事务出现地比最小id晚但是已经提交）。如果是读提交的隔离级别，则每次读都会生成一个新的ReadView，如果是可重复读，则只使用事务开始时的ReadView。
+
+使用next-key locks对间隙加锁，防止当前读（不是快照读）时出现幻读（一般出现在non-locking read （快照读，select）之后跟一个locking read （当前读，select for update，被认为是写，基于乐观锁机制进行更新））。
 
 ## Redis
 ### 缓存异常
