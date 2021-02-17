@@ -99,6 +99,25 @@ cookie不是很安全，别人可以分析存放在本地的COOKIE并进行COOKI
 
 
 # Databases
+### MyISAM vs. InnoDB
+每个MyISAM在磁盘上存储成三个文件。分别为：表定义文件、数据文件、索引文件。InnoDB所有的表都保存在同一个数据文件中（也可能是多个文件，或者是独立的表空间文件），InnoDB表的大小只受限于操作系统文件的大小，一般为2GB。\
+InnoDB支持事务，MyISAM不支持。\
+InnoDB支持外键，MyISAM不支持。\
+InnoDB是聚簇索引，MyISAM是非聚簇索引。\
+InnoDB最小锁粒度是行锁，MyISAM是表锁，一个更新语句会锁住整张表，大量读查询时大粒度的锁可能速度更快。\
+MyISAM保存了表的总行数，InnoDB没有（select count(*) from table会遍历整张表，有where的时候两种引擎处理方式相同）。
+
+### MVCC
+处理读写冲突，读操作只读取该事务开始前数据库的快照，避免脏读和不可重复读。\
+避免不可重复读的原因是，同一个事务中多个读操作均读的是快照。读提交时每个快照都会生成获取最新的视图。\
+snapshot isolation: every tuple gets an LSN, read highest LSN that is lower than the start timestamp, write check at the end whether the latest version of all written tuples is the one written (乐观锁); undo records of every modification they make, transaction is assigned a SCN (System Change Number), read blocks with an SCN
+lower than the start SCN, if a block is too new, a copy is made, and undo records applied to recreate a version with a suitable
+
+## Redis
+### 缓存异常
+缓存雪崩：大面积缓存同时失效，数据库短时间负载过大。可以设置随机过期时间，或者在数据库上加锁排队。\
+缓存击穿：缓存中没有但是数据库中有，与缓存雪崩不同的是缓存击穿特指并发查同一条数据。可以设置热点数据永不过期，或者加互斥锁。\
+缓存穿透：缓存与数据库上都没有，一般是攻击者。可以在接口层增加校验，或者使用布隆过滤器。
 
 # Algorithms
 ### 排序
