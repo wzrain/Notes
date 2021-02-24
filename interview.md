@@ -8,6 +8,13 @@ static函数与static全局变量类似，用于声明仅在该文件内部可�
 ### semaphore vs. mutex
 信号量管理资源的数量，一定程度上调度线程，mutex管理资源的使用权。
 
+### PCB
+process identification: pid, uid, ...
+process state: registers, stack and frame pointers, PC, ...
+process control: scheduling state (ready, suspended, ..., priorities), process structure (chidren ids, ...), IPC information (flags, signals, ...), memory management information, I/O status, ...
+
+TCB (Thread Control Block): tid, stack pointer, PC, state (running, ready, ...), registers, pointer to PCB
+
 ### 条件变量
 生产者消费者问题中如果使用互斥锁忙等，可能占用大量CPU。使用条件变量休眠或者唤醒线程：
 ```C++
@@ -59,6 +66,12 @@ sort -t ':' -k 3 -nr a.txt // 每行以冒号分隔后按照第3列降序数字�
 du -h | sort -hr // 按照文件大小排序当前文件夹文件\
 ps aux | sort -gr -k 4 | head -n 5 // 内存占用最多的5个进程
 
+### I/O多路复用
+多路复用的优势不是处理单个连接更快（需要select然后再read），而是可以处理更多的文件描述符（连接）。\
+select/poll返回后还需要遍历fdset找到就绪的描述符。
+
+epoll_create创建一个文件描述符，指定监听的文件描述符的最大值；epoll_ctl对epoll_create创建的描述符进行操作（添加、删除、修改监听的描述符），epoll_event指定对监听的描述符监听的具体事件，有事件发生时采用回调机制激活被监听的描述符；epoll_wait返回指定个数的事件。\
+LT模式下应用程序可以不处理事件，下次调用epoll_wait还会触发。ET模式下应用程序需要立即处理该事件，下次调用epoll_wait不会触发。ET模式减少了epoll事件被触发的次数（需要使用非阻塞socket防止未被处理的文件描述符饿死），同时调用者如果发现recv的数据大小等于请求的大小，则说明可能还有数据没有被处理完。如果有大量的idle-connection，epoll的效率大大高于select/poll。
 
 ## Multithreading
 ### 线程交替打印
@@ -91,6 +104,9 @@ void bar() {
 
 
 # Computer Networks
+### RTT, MSL, TTL
+RTT为发送报文到收到确认的时间。MSL为报文最大生存时间，手动设置为30s/1min/2min（TIME_WAIT等待2MSL确保自己最后的ACK到达，如果没到达则2MSL内会收到对方发送的新的FIN）。TTL为IP数据报可以经过的最大路由数。
+
 ### Cookie vs. Session
 Cookie通过在客户端记录信息确定用户身份，Session通过在服务器端记录信息确定用户身份。\
 HTTP协议是无状态的协议。一旦数据交换完毕，客户端与服务器端的连接就会关闭，再次交换数据需要建立新的连接。这就意味着服务器无法从连接上跟踪会话。在Session出现之前，基本上所有的网站都采用Cookie来跟踪会话。\
@@ -113,13 +129,23 @@ cookie不是很安全，别人可以分析存放在本地的COOKIE并进行COOKI
 
 
 # Databases
+### MySQL索引类型
+普通索引：create index ... on table(column(...)) \
+唯一索引：索引值可以为空。create unique index ... \
+主键索引：一个表只有一个主键，不能为空，一般在建表时直接声明primary key(...)。\
+组合索引：最左前缀都可以使用。\
+全文索引：查找关键字，建表时声明fulltext(...)。数据量较大时，将数据放入一个没有全局索引的表中，然后再用CREATE index创建fulltext索引比较快。在match(...)时使用，比like%效率高。星号通配符只能在词后面。
+
+哈希索引：无法用于排序分组以及部分或者范围查找。
+
 ### MyISAM vs. InnoDB
 每个MyISAM在磁盘上存储成三个文件。分别为：表定义文件、数据文件、索引文件。InnoDB所有的表都保存在同一个数据文件中（也可能是多个文件，或者是独立的表空间文件），InnoDB表的大小只受限于操作系统文件的大小，一般为2GB。\
 InnoDB支持事务，MyISAM不支持。\
 InnoDB支持外键，MyISAM不支持。\
 InnoDB是聚簇索引，MyISAM是非聚簇索引。\
 InnoDB最小锁粒度是行锁，MyISAM是表锁，一个更新语句会锁住整张表，大量读查询时大粒度的锁可能速度更快。\
-MyISAM保存了表的总行数，InnoDB没有（select count(*) from table会遍历整张表，有where的时候两种引擎处理方式相同）。
+MyISAM保存了表的总行数，InnoDB没有（select count(*) from table会遍历整张表，有where的时候两种引擎处理方式相同）。、
+MyISAM支持全文索引，InnoDB在MySQL 5.6之后也支持全文索引。
 
 ### MVCC
 处理读写冲突，读操作只读取该事务开始前数据库的快照，避免脏读和不可重复读。\
@@ -164,6 +190,9 @@ for i in range(n - 1): # 最多遍历n - 1次，因为每次遍历完最后一�
         if arr[j] > arr[j + 1]:
             swap(arr[j], arr[j + 1])
 ```
+
+### LRU
+哈希表+双链表，双链表有单独head和rear节点指示头尾，便于添加删除。put时如果key在哈希表中需要增加size并new新的value，否则需要更改value。
 
 # Other
 
@@ -217,3 +246,23 @@ public:
 ```
 
 ## Docker
+
+
+## Distributed Systems
+### Zookeeper
+bigtable (chubby): distributed lock service (five replicas, one of which elected as master), namespace for directories and small files, hierarchy for tablet (tablet servers are chubby clients) locations \
+files also store root metadata \
+ensure single master via unique master lock
+
+### RPC
+远程调用像本地调用一样，传输数据没必要文本协议（http），可以直接二进制传输。\
+RPC实现类（Stub）调用一个runtime library（socket, HttpClient, ...），将数据序列化为二进制，传给另一个service（负载均衡确定service的地址）。另一个service将二进制数据反序列化为请求对象，Stub解析请求对象得到要调用的接口，将请求对象传给实际的实现类执行。
+
+### 2-Phase Commit 
+投票阶段：协调者向参与者发送事务请求，参与者反馈事务结果但是不提交，记录日志；事务提交阶段：如果全部执行正常，协调者发送commit通知，参与者收到后提交，并返回ack，如果有参与者不正常或者超时未回复，协调者发送rollback。
+
+2PC会有单点故障和同步阻塞问题（协调者下线时（尤其是commit消息发送之前）参与者阻塞）。网络异常时有某些commit未到达则可能部分commit（如果是协调者故障，可以通过协调者的log进行恢复；如果是参与者超时，则可以重新发送）。\
+可以通过互询机制让参与者向其他参与者询问执行情况，避免因为与协调者的通信问题造成参与者阻塞以及暂时的数据不一致（部分commit）。
+
+3PC：增加CanCommit阶段，协调者询问，参与者向协调者回复估计是否可以执行。如果CanCommit有no或者超时则直接abort事务。\
+3PC中如果协调者在commit/rollback消息发送前下线或者消息超时，参与者不会阻塞，而是超时后继续commit（由于引入了CanCommit，概率上讲事务成功的概率大，不过仍然可能数据不一致）。
