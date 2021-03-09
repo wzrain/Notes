@@ -11,6 +11,83 @@ static函数与static全局变量类似，用于声明仅在该文件内部可�
 静态链接将.o文件与引用的库一起打包到可执行文件中。Linux静态链接库扩展名为.a（win中为.lib），本质上是一组.o文件的集合。静态链接得到的可执行文件移植方便（因为可执行文件已经打包好，不需要运行环境中存在所需的库）。\
 静态链接占用大量空间，库更新时需要全量更新。动态链接的库在运行时才被载入，不同的应用程序可以在内存中共享一个库的实例。Linux中通过dlopen函数将.so库加载到进程中，通过动态链接器ld.so链接到当前进程（查找未定义的符号的地址，分配内存，初始化等）。win中如果直接调用动态链接库的函数，在编译时的链接中会将该库的一小段.lib链接进去，包含该.dll的相关信息，运行时可以找到相应的库；或者程序真正运行的时候调用API显式将.dll载入内存。
 
+### 虚函数
+虚函数表保存函数指针，如果子类将父类的虚函数重写，则将原先父类虚函数在表中的位置换为子类虚函数。\
+多继承情况下，派生类中有多个虚函数表，顺序为继承顺序。如果不是第一个基类，编译器会计算offset，使之访问正确的虚函数表。派生类重写了多个基类的同名虚函数后，非第一个基类的指向派生类的指针调用的时候使用thunk技术跳转到第一个虚函数表对应的位置。派生类新定义的虚函数在第一个基类的虚函数表后面，在后面的基类指针调用的时候借助thunk技术跳转的正确的位置。\
+非虚函数并不占用对象内存，而是在以普通函数对待，参数中增加一个this指针。\
+虚继承把虚基类的成员放在后面。因此将虚基类指针指向派生类对象时，需要把指针移到后面虚基类成员开始的地方。
+
+### 内存管理
+代码段、数据段（初始化的数据）、bss段（未初始化的数据）、堆、栈。\
+五个区：堆、栈、全局/静态区、文字常量区、代码区。
+
+### 智能指针
+```C++
+template <typename T>
+class SmartPointer {
+private:
+    T* ptr;
+    size_t *counter;
+    void decrement() {
+        if (ptr) {
+            (*counter)--;
+            if ((*counter) == 0) {
+                delete ptr;
+                delete counter;
+            }
+        }
+    }
+public:
+    SmartPointer(T *p = 0) : ptr(p), counter(new size_t) {
+        if (p) *counter = 1;
+        else *counter = 0;
+    }
+
+    SmartPointer(const SmartPointer& sp) {
+        ptr = sp.ptr
+        counter = sp.counter;
+        (*counter)++;
+    }
+
+    SmartPointer& operator=(const SmartPointer& sp) {
+        if (sp.ptr == ptr) return *this;
+        decrement();
+        ptr = sp.ptr;
+        counter = sp.counter;
+        (*counter) ++;
+        return *this;
+    }
+
+    T& operator*() {
+        if (ptr) return *ptr;
+        // throw exception
+    }
+
+    T* operator->() {
+        if (ptr) return ptr;
+        // throw exception
+    }
+
+    ~SmartPointer() {
+        decrement();
+        if (counter) delete counter;
+    }
+}
+```
+循环引用：
+```C++
+struct Node {
+    int val;
+    shared_ptr<Node> prev;
+    shared_ptr<Node> next;
+    Node(int v) : val(v) {}
+};
+
+shared_ptr<Node> head = make_shared<Node>(0);
+head->next = make_shared<Node>(0);
+head->next->prev = head;
+// head的引用计数为2，离开作用域时减不到0，不会被析构，因此head->next依旧被引用着，也不会被析构。将prev改为weak_ptr解决循环引用问题。
+```
 
 # Operating Systems
 ### semaphore vs. mutex
